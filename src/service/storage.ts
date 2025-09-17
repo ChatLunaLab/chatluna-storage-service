@@ -230,7 +230,7 @@ export class ChatLunaStorageService extends Service {
         if (fileType != null) {
             // reset randomName typpe
             randomName =
-                randomName.split('.')?.[0] ?? randomName + '.' + fileType
+                (randomName.split('.')?.[0] ?? randomName) + '.' + fileType
         }
 
         const filePath = join(this.config.storagePath, 'temp', randomName)
