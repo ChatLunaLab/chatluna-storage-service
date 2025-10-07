@@ -228,7 +228,7 @@ export class ChatLunaStorageService extends Service {
         let randomName = randomFileName(filename)
 
         if (fileType != null) {
-            // reset randomName typpe
+            // reset randomName type
             randomName =
                 (randomName.split('.')?.[0] ?? randomName) + '.' + fileType
         }
@@ -243,6 +243,7 @@ export class ChatLunaStorageService extends Service {
         const expireTime =
             Date.now() +
             (expireHours || this.config.tempCacheTime) * 60 * 60 * 1000
+
         const currentTime = Date.now()
         const fileInfo: TempFileInfo = {
             id: randomName.split('.')[0],
