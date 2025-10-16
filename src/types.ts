@@ -2,10 +2,10 @@ export interface TempFileInfo {
     path: string
     name: string
     type?: string
-    expireTime: number
+    expireTime: Date
     id: string
     size: number
-    accessTime: number
+    accessTime: Date
     accessCount: number
 }
 

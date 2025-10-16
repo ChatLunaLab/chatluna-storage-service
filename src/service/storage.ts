@@ -42,9 +42,9 @@ export class ChatLunaStorageService extends Service {
                     type: 'string',
                     nullable: true
                 },
-                expireTime: 'integer',
+                expireTime: 'timestamp',
                 size: 'integer',
-                accessTime: 'integer',
+                accessTime: 'timestamp',
                 accessCount: 'integer'
             },
             {
@@ -64,7 +64,7 @@ export class ChatLunaStorageService extends Service {
 
     private async initializeLRU() {
         const files = await this.ctx.database.get('chatluna_storage_temp', {})
-        files.sort((a, b) => b.accessTime - a.accessTime)
+        files.sort((a, b) => b.accessTime.getTime() - a.accessTime.getTime())
         for (const file of files) {
             this.addToLRU(file.id)
         }
@@ -107,7 +107,7 @@ export class ChatLunaStorageService extends Service {
 
         if (totalSize <= maxSizeBytes) return
 
-        const sortedFiles = files.sort((a, b) => a.accessTime - b.accessTime)
+        const sortedFiles = files.sort((a, b) => a.accessTime.getTime() - b.accessTime.getTime())
         let currentSize = totalSize
 
         for (const file of sortedFiles) {
@@ -135,7 +135,7 @@ export class ChatLunaStorageService extends Service {
 
         if (files.length <= this.config.maxStorageCount) return
 
-        const sortedFiles = files.sort((a, b) => a.accessTime - b.accessTime)
+        const sortedFiles = files.sort((a, b) => a.accessTime.getTime() - b.accessTime.getTime())
         const filesToDelete =
             files.length - Math.floor(this.config.maxStorageCount * 0.8)
 
@@ -168,7 +168,7 @@ export class ChatLunaStorageService extends Service {
                 'chatluna_storage_temp',
                 {
                     expireTime: {
-                        $lt: Date.now()
+                        $lt: new Date(Date.now())
                     }
                 }
             )
@@ -241,10 +241,10 @@ export class ChatLunaStorageService extends Service {
         await fs.writeFile(filePath, processedBuffer)
 
         const expireTime =
-            Date.now() +
-            (expireHours || this.config.tempCacheTime) * 60 * 60 * 1000
+            new Date(Date.now() +
+              (expireHours || this.config.tempCacheTime) * 60 * 60 * 1000)
 
-        const currentTime = Date.now()
+        const currentTime = new Date()
         const fileInfo: TempFileInfo = {
             id: randomName.split('.')[0],
             path: filePath,
@@ -283,7 +283,7 @@ export class ChatLunaStorageService extends Service {
 
         const file = fileInfo[0]
 
-        const currentTime = Date.now()
+        const currentTime = new Date()
         await this.ctx.database.set(
             'chatluna_storage_temp',
             { id: file.id },
