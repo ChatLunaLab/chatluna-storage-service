@@ -20,6 +20,13 @@ export function apply(ctx: Context, config: Config) {
                     return (koa.body = 'File not found')
                 }
 
+                // If file has a public URL and storage is remote, redirect to it
+                if (fileInfo.publicUrl && fileInfo.storageType !== 'local') {
+                    koa.redirect(fileInfo.publicUrl)
+                    return
+                }
+
+                // For local files or files without public URL, serve directly
                 koa.set(
                     'Content-Type',
                     fileInfo.type || 'application/octet-stream'

@@ -2,7 +2,7 @@ import { Context, Service, Time } from 'koishi'
 import { Config, logger } from '..'
 import { TempFileInfo, TempFileInfoWithData } from '../types'
 import { getImageType, randomFileName } from '../utils'
-import { join } from 'path'
+import { StorageBackend, createStorageBackend, StorageConfig } from '../backends'
 import fs from 'fs/promises'
 
 interface LRUNode {
@@ -10,13 +10,13 @@ interface LRUNode {
     prev: LRUNode | null
     next: LRUNode | null
 }
-
 export class ChatLunaStorageService extends Service {
     private lruHead: LRUNode
     private lruTail: LRUNode
     private lruMap: Map<string, LRUNode>
 
     private backendPath: string
+    private storageBackend: StorageBackend
 
     constructor(
         ctx: Context,
@@ -32,6 +32,9 @@ export class ChatLunaStorageService extends Service {
 
         this.backendPath = this.config.backendPath
 
+        // Initialize storage backend based on config
+        this.storageBackend = createStorageBackend(this.getStorageConfig())
+
         ctx.database.extend(
             'chatluna_storage_temp',
             {
@@ -45,7 +48,16 @@ export class ChatLunaStorageService extends Service {
                 expireTime: 'timestamp',
                 size: 'integer',
                 accessTime: 'timestamp',
-                accessCount: 'integer'
+                accessCount: 'integer',
+                // New optional fields for multi-backend support
+                storageType: {
+                    type: 'string',
+                    nullable: true
+                },
+                publicUrl: {
+                    type: 'string',
+                    nullable: true
+                }
             },
             {
                 autoInc: false,
@@ -55,11 +67,63 @@ export class ChatLunaStorageService extends Service {
 
         this.setupAutoDelete()
         this.initializeLRU()
+        this.initStorageBackend()
 
         ctx.inject(['server'], (ctx) => {
             const backendPath = `${config.serverPath ?? ctx.server.selfUrl}${this.config.backendPath}`
             this.backendPath = backendPath
         })
+    }
+
+    private getStorageConfig(): StorageConfig {
+        const backendType = this.config.storageBackend ?? 'local'
+
+        switch (backendType) {
+            case 's3':
+                return {
+                    type: 's3',
+                    endpoint: this.config.s3Endpoint!,
+                    bucket: this.config.s3Bucket!,
+                    region: this.config.s3Region!,
+                    accessKeyId: this.config.s3AccessKeyId!,
+                    secretAccessKey: this.config.s3SecretAccessKey!,
+                    publicUrl: this.config.s3PublicUrl,
+                    pathStyle: this.config.s3PathStyle
+                }
+            case 'webdav':
+                return {
+                    type: 'webdav',
+                    endpoint: this.config.webdavEndpoint!,
+                    username: this.config.webdavUsername,
+                    password: this.config.webdavPassword,
+                    basePath: this.config.webdavBasePath,
+                    publicUrl: this.config.webdavPublicUrl
+                }
+            case 'r2':
+                return {
+                    type: 'r2',
+                    accountId: this.config.r2AccountId!,
+                    bucket: this.config.r2Bucket!,
+                    accessKeyId: this.config.r2AccessKeyId!,
+                    secretAccessKey: this.config.r2SecretAccessKey!,
+                    publicUrl: this.config.r2PublicUrl
+                }
+            case 'local':
+            default:
+                return {
+                    type: 'local',
+                    storagePath: this.config.storagePath
+                }
+        }
+    }
+
+    private async initStorageBackend() {
+        try {
+            await this.storageBackend.init()
+            logger.info(`Storage backend initialized: ${this.storageBackend.type}`)
+        } catch (error) {
+            logger.error('Failed to initialize storage backend:', error)
+        }
     }
 
     private async initializeLRU() {
@@ -114,7 +178,7 @@ export class ChatLunaStorageService extends Service {
             if (currentSize <= maxSizeBytes * 0.8) break
 
             try {
-                await fs.unlink(file.path)
+                await this.deleteFileFromBackend(file)
                 await this.ctx.database.remove('chatluna_storage_temp', {
                     id: file.id
                 })
@@ -142,7 +206,7 @@ export class ChatLunaStorageService extends Service {
         for (let i = 0; i < filesToDelete; i++) {
             const file = sortedFiles[i]
             try {
-                await fs.unlink(file.path)
+                await this.deleteFileFromBackend(file)
                 await this.ctx.database.remove('chatluna_storage_temp', {
                     id: file.id
                 })
@@ -156,8 +220,31 @@ export class ChatLunaStorageService extends Service {
         }
     }
 
+    private async deleteFileFromBackend(file: TempFileInfo): Promise<void> {
+        const storageType = file.storageType ?? 'local'
+
+        if (storageType === 'local') {
+            // For local files, use fs.unlink with the path
+            await fs.unlink(file.path)
+        } else {
+            // For remote storage, use the current backend if it matches, otherwise create a temporary one
+            if (this.storageBackend.type === storageType) {
+                await this.storageBackend.delete(file.path)
+            } else {
+                // If file was stored with a different backend type, we still try to delete from current
+                // This handles migration scenarios
+                try {
+                    await this.storageBackend.delete(file.path)
+                } catch {
+                    // Ignore errors when deleting from mismatched backend
+                }
+            }
+        }
+    }
+
     private setupAutoDelete() {
         const ctx = this.ctx
+        const self = this
 
         async function execute() {
             if (!ctx.scope.isActive) {
@@ -181,7 +268,7 @@ export class ChatLunaStorageService extends Service {
 
             for (const file of expiredFiles) {
                 try {
-                    await fs.unlink(file.path)
+                    await self.deleteFileFromBackend(file)
                     await ctx.database.remove('chatluna_storage_temp', {
                         id: file.id
                     })
@@ -233,12 +320,8 @@ export class ChatLunaStorageService extends Service {
                 (randomName.split('.')?.[0] ?? randomName) + '.' + fileType
         }
 
-        const filePath = join(this.config.storagePath, 'temp', randomName)
-
-        await fs.mkdir(join(this.config.storagePath, 'temp'), {
-            recursive: true
-        })
-        await fs.writeFile(filePath, processedBuffer)
+        // Upload to storage backend
+        const result = await this.storageBackend.upload(processedBuffer, randomName)
 
         const expireTime =
             new Date(Date.now() +
@@ -247,22 +330,27 @@ export class ChatLunaStorageService extends Service {
         const currentTime = new Date()
         const fileInfo: TempFileInfo = {
             id: randomName.split('.')[0],
-            path: filePath,
+            path: result.key,
             name: randomName,
             type: fileType,
             expireTime,
             size: processedBuffer.length,
             accessTime: currentTime,
-            accessCount: 1
+            accessCount: 1,
+            storageType: this.storageBackend.type,
+            publicUrl: result.publicUrl
         }
 
         await this.ctx.database.create('chatluna_storage_temp', fileInfo)
         this.addToLRU(fileInfo.id)
 
+        // If backend has public URL, use it; otherwise use local backend path
+        const url = result.publicUrl ?? `${this.backendPath}/temp/${randomName}`
+
         return {
             ...fileInfo,
             data: Promise.resolve(processedBuffer),
-            url: `${this.backendPath}/temp/${randomName}`
+            url
         }
     }
 
@@ -296,12 +384,30 @@ export class ChatLunaStorageService extends Service {
         this.addToLRU(id)
 
         try {
+            // Determine how to download the file based on storage type
+            const storageType = file.storageType ?? 'local'
+            let dataPromise: Promise<Buffer>
+
+            if (storageType === 'local') {
+                // For local files, use the path directly
+                dataPromise = fs.readFile(file.path)
+            } else if (this.storageBackend.type === storageType) {
+                // Use current backend if it matches
+                dataPromise = this.storageBackend.download(file.path)
+            } else {
+                // Fallback: try to read as local file (for backward compatibility)
+                dataPromise = fs.readFile(file.path)
+            }
+
+            // If file has public URL, use it; otherwise use local backend path
+            const url = file.publicUrl ?? `${this.backendPath}/temp/${file.name}`
+
             return {
                 ...file,
                 accessTime: currentTime,
                 accessCount: file.accessCount + 1,
-                data: fs.readFile(file.path),
-                url: `${this.backendPath}/temp/${file.name}`
+                data: dataPromise,
+                url
             }
         } catch (error) {
             await this.ctx.database.remove('chatluna_storage_temp', { id })

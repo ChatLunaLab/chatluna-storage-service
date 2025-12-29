@@ -7,6 +7,10 @@ export interface TempFileInfo {
     size: number
     accessTime: Date
     accessCount: number
+    /** Storage backend type (local, s3, webdav, r2). Defaults to 'local' for existing records */
+    storageType?: string
+    /** Public URL for remote storage backends. If set, backend.ts will redirect to this URL */
+    publicUrl?: string
 }
 
 export interface TempFileInfoWithData<T> extends TempFileInfo {
