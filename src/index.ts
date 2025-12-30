@@ -71,12 +71,13 @@ export interface Config {
 export const Config: Schema<Config> = Schema.intersect([
     Schema.object({
         storageBackend: Schema.union([
+            Schema.const('?').description('别选，特么的'),
             Schema.const('local').description('本地文件存储'),
             Schema.const('s3').description('S3 兼容存储 (AWS S3, MinIO 等)'),
             Schema.const('webdav').description('WebDAV 存储'),
             Schema.const('r2').description('Cloudflare R2 存储')
         ])
-            .default('local')
+            .required()
             .description('存储后端类型'),
 
         serverPath: Schema.string()
