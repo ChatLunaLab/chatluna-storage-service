@@ -71,13 +71,12 @@ export interface Config {
 export const Config: Schema<Config> = Schema.intersect([
     Schema.object({
         storageBackend: Schema.union([
-            Schema.const('null').description('??').hidden(),
             Schema.const('local').description('本地文件存储'),
             Schema.const('s3').description('S3 兼容存储 (AWS S3, MinIO 等)'),
             Schema.const('webdav').description('WebDAV 存储'),
             Schema.const('r2').description('Cloudflare R2 存储')
         ])
-            .required()
+            .default('local')
             .description('存储后端类型'),
 
         serverPath: Schema.string()
@@ -157,8 +156,9 @@ export const Config: Schema<Config> = Schema.intersect([
             backendPath: Schema.string()
                 .description('后端文件服务器监听的路径')
                 .default('/chatluna-storage')
-        }).description('本地存储配置')
+        }).description('本地存储配置'),
+        Schema.object({})
     ])
-])
+]) as any
 
 export const name = 'chatluna-storage-service'
