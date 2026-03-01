@@ -1,3 +1,13 @@
+import { createHash } from 'crypto'
+
+/**
+ * Computes the SHA-256 hash of the given buffer and returns it as a hex string.
+ * SHA-256 is cryptographically modern and collision-resistant.
+ */
+export function computeHash(buffer: Buffer): string {
+    return createHash('sha256').update(buffer).digest('hex')
+}
+
 export function getImageType(
     buffer: Buffer,
     pure: boolean = false,

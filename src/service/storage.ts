@@ -1,7 +1,7 @@
 import { Context, Service, Time } from 'koishi'
 import { Config, logger } from '..'
 import { TempFileInfo, TempFileInfoWithData } from '../types'
-import { getImageType, randomFileName } from '../utils'
+import { computeHash, getImageType, randomFileName } from '../utils'
 import { StorageBackend, createStorageBackend, StorageConfig } from '../backends'
 import fs from 'fs/promises'
 
@@ -57,6 +57,11 @@ export class ChatLunaStorageService extends Service {
                 publicUrl: {
                     type: 'string',
                     nullable: true
+                },
+                hash: {
+                    type: 'string',
+                    initial: '',
+                    nullable: false
                 }
             },
             {
@@ -176,21 +181,8 @@ export class ChatLunaStorageService extends Service {
 
         for (const file of sortedFiles) {
             if (currentSize <= maxSizeBytes * 0.8) break
-
-            try {
-                await this.deleteFileFromBackend(file)
-                await this.ctx.database.remove('chatluna_storage_temp', {
-                    id: file.id
-                })
-                this.removeFromLRU(file.id)
-                currentSize -= file.size
-            } catch (error) {
-                await this.ctx.database.remove('chatluna_storage_temp', {
-                    id: file.id
-                })
-                this.removeFromLRU(file.id)
-                currentSize -= file.size
-            }
+            currentSize -= file.size
+            await this.removeFile(file)
         }
     }
 
@@ -200,92 +192,62 @@ export class ChatLunaStorageService extends Service {
         if (files.length <= this.config.maxStorageCount) return
 
         const sortedFiles = files.sort((a, b) => a.accessTime.getTime() - b.accessTime.getTime())
-        const filesToDelete =
-            files.length - Math.floor(this.config.maxStorageCount * 0.8)
+        const filesToDelete = files.length - Math.floor(this.config.maxStorageCount * 0.8)
 
         for (let i = 0; i < filesToDelete; i++) {
-            const file = sortedFiles[i]
-            try {
-                await this.deleteFileFromBackend(file)
-                await this.ctx.database.remove('chatluna_storage_temp', {
-                    id: file.id
-                })
-                this.removeFromLRU(file.id)
-            } catch (error) {
-                await this.ctx.database.remove('chatluna_storage_temp', {
-                    id: file.id
-                })
-                this.removeFromLRU(file.id)
-            }
+            await this.removeFile(sortedFiles[i])
         }
+    }
+
+    private downloadFile(file: TempFileInfo): Promise<Buffer> {
+        const storageType = file.storageType ?? 'local'
+        if (storageType !== 'local' && this.storageBackend.type === storageType) {
+            return this.storageBackend.download(file.path)
+        }
+        return fs.readFile(file.path)
+    }
+
+    private async removeFile(file: TempFileInfo): Promise<void> {
+        try {
+            await this.deleteFileFromBackend(file)
+        } catch {
+            // best-effort delete; always clean up DB record
+        }
+        await this.ctx.database.remove('chatluna_storage_temp', { id: file.id })
+        this.removeFromLRU(file.id)
     }
 
     private async deleteFileFromBackend(file: TempFileInfo): Promise<void> {
         const storageType = file.storageType ?? 'local'
-
         if (storageType === 'local') {
-            // For local files, use fs.unlink with the path
             await fs.unlink(file.path)
         } else {
-            // For remote storage, use the current backend if it matches, otherwise create a temporary one
-            if (this.storageBackend.type === storageType) {
+            // For mismatched backend types (migration), errors are silently ignored
+            try {
                 await this.storageBackend.delete(file.path)
-            } else {
-                // If file was stored with a different backend type, we still try to delete from current
-                // This handles migration scenarios
-                try {
-                    await this.storageBackend.delete(file.path)
-                } catch {
-                    // Ignore errors when deleting from mismatched backend
-                }
+            } catch (e) {
+                if (this.storageBackend.type === storageType) throw e
             }
         }
     }
 
     private setupAutoDelete() {
         const ctx = this.ctx
-        const self = this
 
-        async function execute() {
-            if (!ctx.scope.isActive) {
-                return
-            }
+        const execute = async () => {
+            if (!ctx.scope.isActive) return
 
-            const expiredFiles = await ctx.database.get(
-                'chatluna_storage_temp',
-                {
-                    expireTime: {
-                        $lt: new Date(Date.now())
-                    }
-                }
-            )
+            const expiredFiles = await ctx.database.get('chatluna_storage_temp', {
+                expireTime: { $lt: new Date(Date.now()) }
+            })
 
-            if (expiredFiles.length === 0) {
-                return
-            }
-
-            const success: TempFileInfo[] = []
+            if (expiredFiles.length === 0) return
 
             for (const file of expiredFiles) {
-                try {
-                    await self.deleteFileFromBackend(file)
-                    await ctx.database.remove('chatluna_storage_temp', {
-                        id: file.id
-                    })
-                    success.push(file)
-                } catch (error) {
-                    await ctx.database.remove('chatluna_storage_temp', {
-                        id: file.id
-                    })
-                    success.push(file)
-                }
+                await this.removeFile(file)
             }
 
-            if (success.length > 0) {
-                logger.success(
-                    `Auto deleted ${success.length} expired temp files`
-                )
-            }
+            logger.success(`Auto deleted ${expiredFiles.length} expired temp files`)
         }
 
         const executeCleanup = async () => {
@@ -308,25 +270,52 @@ export class ChatLunaStorageService extends Service {
         filename: string,
         expireHours?: number
     ): Promise<TempFileInfoWithData<Buffer>> {
+        // Compute hash first to detect duplicates
+        const hash = computeHash(buffer)
+
+        // Check for an existing file with the same content hash
+        const existing = await this.ctx.database.get('chatluna_storage_temp', {
+            hash
+        })
+
+        if (existing.length > 0) {
+            const dup = existing[0]
+            const currentTime = new Date()
+
+            // Refresh access metadata on the deduplicated file
+            await this.ctx.database.set(
+                'chatluna_storage_temp',
+                { id: dup.id },
+                {
+                    accessTime: currentTime,
+                    accessCount: dup.accessCount + 1
+                }
+            )
+            this.addToLRU(dup.id)
+
+            const url = dup.publicUrl ?? `${this.backendPath}/temp/${dup.name}`
+            return {
+                ...dup,
+                accessTime: currentTime,
+                accessCount: dup.accessCount + 1,
+                data: this.downloadFile(dup),
+                url
+            }
+        }
+
         const fileType = getImageType(buffer, true, true)
 
-        const processedBuffer = buffer
-
         let randomName = randomFileName(filename)
-
         if (fileType != null) {
-            // reset randomName type
-            randomName =
-                (randomName.split('.')?.[0] ?? randomName) + '.' + fileType
+            randomName = (randomName.split('.')?.[0] ?? randomName) + '.' + fileType
         }
 
         // Upload to storage backend
-        const result = await this.storageBackend.upload(processedBuffer, randomName)
+        const result = await this.storageBackend.upload(buffer, randomName)
 
-        const expireTime =
-            new Date(Date.now() +
-              (expireHours || this.config.tempCacheTime) * 60 * 60 * 1000)
-
+        const expireTime = new Date(
+            Date.now() + (expireHours || this.config.tempCacheTime) * 60 * 60 * 1000
+        )
         const currentTime = new Date()
         const fileInfo: TempFileInfo = {
             id: randomName.split('.')[0],
@@ -334,22 +323,21 @@ export class ChatLunaStorageService extends Service {
             name: randomName,
             type: fileType,
             expireTime,
-            size: processedBuffer.length,
+            size: buffer.length,
             accessTime: currentTime,
             accessCount: 1,
             storageType: this.storageBackend.type,
-            publicUrl: result.publicUrl
+            publicUrl: result.publicUrl,
+            hash
         }
 
         await this.ctx.database.create('chatluna_storage_temp', fileInfo)
         this.addToLRU(fileInfo.id)
 
-        // If backend has public URL, use it; otherwise use local backend path
         const url = result.publicUrl ?? `${this.backendPath}/temp/${randomName}`
-
         return {
             ...fileInfo,
-            data: Promise.resolve(processedBuffer),
+            data: Promise.resolve(buffer),
             url
         }
     }
@@ -384,24 +372,21 @@ export class ChatLunaStorageService extends Service {
         this.addToLRU(id)
 
         try {
-            // Determine how to download the file based on storage type
-            const storageType = file.storageType ?? 'local'
-            let dataPromise: Promise<Buffer>
+            const dataPromise = this.downloadFile(file)
 
-            if (storageType === 'local') {
-                // For local files, use the path directly
-                dataPromise = fs.readFile(file.path)
-            } else if (this.storageBackend.type === storageType) {
-                // Use current backend if it matches
-                dataPromise = this.storageBackend.download(file.path)
-            } else {
-                // Fallback: try to read as local file (for backward compatibility)
-                dataPromise = fs.readFile(file.path)
+            // Backfill missing hash: compute and persist asynchronously
+            if (!file.hash) {
+                dataPromise.then((data) => {
+                    const hash = computeHash(data)
+                    this.ctx.database
+                        .set('chatluna_storage_temp', { id: file.id }, { hash })
+                        .catch((err) =>
+                            logger.warn('Failed to backfill hash for file', file.id, err)
+                        )
+                }).catch(() => {})
             }
 
-            // If file has public URL, use it; otherwise use local backend path
             const url = file.publicUrl ?? `${this.backendPath}/temp/${file.name}`
-
             return {
                 ...file,
                 accessTime: currentTime,

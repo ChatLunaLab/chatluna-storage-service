@@ -11,6 +11,8 @@ export interface TempFileInfo {
     storageType?: string
     /** Public URL for remote storage backends. If set, backend.ts will redirect to this URL */
     publicUrl?: string
+    /** SHA-256 hash of the file content. Empty string if not yet computed. */
+    hash: string
 }
 
 export interface TempFileInfoWithData<T> extends TempFileInfo {
