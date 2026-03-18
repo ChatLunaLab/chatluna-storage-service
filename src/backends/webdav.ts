@@ -1,4 +1,10 @@
-import { StorageBackend, StorageResult, WebDAVStorageConfig } from './base'
+import {
+    readStream,
+    StorageBackend,
+    StorageResult,
+    StorageUploadOptions,
+    WebDAVStorageConfig
+} from './base'
 
 export class WebDAVStorageBackend implements StorageBackend {
     readonly type = 'webdav' as const
@@ -24,7 +30,8 @@ export class WebDAVStorageBackend implements StorageBackend {
         }
 
         if (this.config.username && this.config.password) {
-            headers['Authorization'] = `Basic ${this.b64(`${this.config.username}:${this.config.password}`)}`
+            headers['Authorization'] =
+                `Basic ${this.b64(`${this.config.username}:${this.config.password}`)}`
         }
 
         // Ensure temp directory exists
@@ -36,7 +43,60 @@ export class WebDAVStorageBackend implements StorageBackend {
             body: new Uint8Array(buffer)
         })
 
-        if (!response.ok && response.status !== 201 && response.status !== 204) {
+        if (
+            !response.ok &&
+            response.status !== 201 &&
+            response.status !== 204
+        ) {
+            throw new Error(`WebDAV upload failed: ${response.status}`)
+        }
+
+        const publicUrl = this.config.publicUrl
+            ? `${this.trimSlash(this.config.publicUrl)}/${this.encodePath(remotePath)}`
+            : undefined
+
+        return {
+            key: remotePath,
+            publicUrl
+        }
+    }
+
+    async uploadStream(
+        stream: NodeJS.ReadableStream,
+        filename: string,
+        options: StorageUploadOptions = {}
+    ): Promise<StorageResult> {
+        if (options.size == null) {
+            return await this.upload(await readStream(stream), filename)
+        }
+
+        const remotePath = `${this.basePath}/temp/${filename}`
+        const url = `${this.trimSlash(this.config.endpoint)}/${this.encodePath(remotePath)}`
+
+        const headers: Record<string, string> = {
+            'Content-Type': options.mimeType ?? 'application/octet-stream',
+            'Content-Length': options.size.toString()
+        }
+
+        if (this.config.username && this.config.password) {
+            headers['Authorization'] =
+                `Basic ${this.b64(`${this.config.username}:${this.config.password}`)}`
+        }
+
+        await this.ensureDirectory(`${this.basePath}/temp`)
+
+        const response = await fetch(url, {
+            method: 'PUT',
+            headers,
+            body: stream as never,
+            duplex: 'half' as never
+        } as RequestInit)
+
+        if (
+            !response.ok &&
+            response.status !== 201 &&
+            response.status !== 204
+        ) {
             throw new Error(`WebDAV upload failed: ${response.status}`)
         }
 
@@ -56,7 +116,8 @@ export class WebDAVStorageBackend implements StorageBackend {
         const headers: Record<string, string> = {}
 
         if (this.config.username && this.config.password) {
-            headers['Authorization'] = `Basic ${this.b64(`${this.config.username}:${this.config.password}`)}`
+            headers['Authorization'] =
+                `Basic ${this.b64(`${this.config.username}:${this.config.password}`)}`
         }
 
         const response = await fetch(url, {
@@ -77,7 +138,8 @@ export class WebDAVStorageBackend implements StorageBackend {
         const headers: Record<string, string> = {}
 
         if (this.config.username && this.config.password) {
-            headers['Authorization'] = `Basic ${this.b64(`${this.config.username}:${this.config.password}`)}`
+            headers['Authorization'] =
+                `Basic ${this.b64(`${this.config.username}:${this.config.password}`)}`
         }
 
         const response = await fetch(url, {
@@ -96,7 +158,8 @@ export class WebDAVStorageBackend implements StorageBackend {
         const headers: Record<string, string> = {}
 
         if (this.config.username && this.config.password) {
-            headers['Authorization'] = `Basic ${this.b64(`${this.config.username}:${this.config.password}`)}`
+            headers['Authorization'] =
+                `Basic ${this.b64(`${this.config.username}:${this.config.password}`)}`
         }
 
         const response = await fetch(url, {
@@ -123,7 +186,8 @@ export class WebDAVStorageBackend implements StorageBackend {
             const headers: Record<string, string> = {}
 
             if (this.config.username && this.config.password) {
-                headers['Authorization'] = `Basic ${this.b64(`${this.config.username}:${this.config.password}`)}`
+                headers['Authorization'] =
+                    `Basic ${this.b64(`${this.config.username}:${this.config.password}`)}`
             }
 
             const response = await fetch(url, {
@@ -152,9 +216,6 @@ export class WebDAVStorageBackend implements StorageBackend {
     }
 
     private encodePath(path: string): string {
-        return path
-            .split('/')
-            .map(encodeURIComponent)
-            .join('/')
+        return path.split('/').map(encodeURIComponent).join('/')
     }
 }

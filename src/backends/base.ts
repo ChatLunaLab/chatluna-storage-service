@@ -9,6 +9,12 @@ export interface StorageResult {
     publicUrl?: string
 }
 
+export interface StorageUploadOptions {
+    size?: number
+    hash?: string
+    mimeType?: string
+}
+
 export interface StorageBackend {
     /** Backend type identifier */
     readonly type: StorageBackendType
@@ -23,6 +29,12 @@ export interface StorageBackend {
      * @returns Storage result with key and optional public URL
      */
     upload(buffer: Buffer, filename: string): Promise<StorageResult>
+
+    uploadStream(
+        stream: NodeJS.ReadableStream,
+        filename: string,
+        options?: StorageUploadOptions
+    ): Promise<StorageResult>
 
     /**
      * Download a file from storage
@@ -90,3 +102,11 @@ export type StorageConfig =
     | S3StorageConfig
     | WebDAVStorageConfig
     | R2StorageConfig
+
+export async function readStream(stream: NodeJS.ReadableStream) {
+    const chunks: Buffer[] = []
+    for await (const chunk of stream) {
+        chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+    }
+    return Buffer.concat(chunks)
+}

@@ -1,5 +1,7 @@
+import { createWriteStream } from 'fs'
 import { join } from 'path'
 import fs from 'fs/promises'
+import { pipeline } from 'stream/promises'
 import { StorageBackend, StorageResult, LocalStorageConfig } from './base'
 
 export class LocalStorageBackend implements StorageBackend {
@@ -19,6 +21,18 @@ export class LocalStorageBackend implements StorageBackend {
     async upload(buffer: Buffer, filename: string): Promise<StorageResult> {
         const filePath = join(this.basePath, filename)
         await fs.writeFile(filePath, buffer)
+
+        return {
+            key: filePath
+        }
+    }
+
+    async uploadStream(
+        stream: NodeJS.ReadableStream,
+        filename: string
+    ): Promise<StorageResult> {
+        const filePath = join(this.basePath, filename)
+        await pipeline(stream, createWriteStream(filePath))
 
         return {
             key: filePath

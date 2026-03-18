@@ -1,8 +1,18 @@
+import { createHash } from 'crypto'
+import { createReadStream, createWriteStream } from 'fs'
+import os from 'os'
+import path from 'path'
+import { Transform } from 'stream'
+import { pipeline } from 'stream/promises'
 import { Context, Service, Time } from 'koishi'
 import { Config, logger } from '..'
 import { TempFileInfo, TempFileInfoWithData } from '../types'
 import { computeHash, getImageType, randomFileName } from '../utils'
-import { StorageBackend, createStorageBackend, StorageConfig } from '../backends'
+import {
+    StorageBackend,
+    createStorageBackend,
+    StorageConfig
+} from '../backends'
 import fs from 'fs/promises'
 
 interface LRUNode {
@@ -125,7 +135,9 @@ export class ChatLunaStorageService extends Service {
     private async initStorageBackend() {
         try {
             await this.storageBackend.init()
-            logger.info(`Storage backend initialized: ${this.storageBackend.type}`)
+            logger.info(
+                `Storage backend initialized: ${this.storageBackend.type}`
+            )
         } catch (error) {
             logger.error('Failed to initialize storage backend:', error)
         }
@@ -176,7 +188,9 @@ export class ChatLunaStorageService extends Service {
 
         if (totalSize <= maxSizeBytes) return
 
-        const sortedFiles = files.sort((a, b) => a.accessTime.getTime() - b.accessTime.getTime())
+        const sortedFiles = files.sort(
+            (a, b) => a.accessTime.getTime() - b.accessTime.getTime()
+        )
         let currentSize = totalSize
 
         for (const file of sortedFiles) {
@@ -191,8 +205,11 @@ export class ChatLunaStorageService extends Service {
 
         if (files.length <= this.config.maxStorageCount) return
 
-        const sortedFiles = files.sort((a, b) => a.accessTime.getTime() - b.accessTime.getTime())
-        const filesToDelete = files.length - Math.floor(this.config.maxStorageCount * 0.8)
+        const sortedFiles = files.sort(
+            (a, b) => a.accessTime.getTime() - b.accessTime.getTime()
+        )
+        const filesToDelete =
+            files.length - Math.floor(this.config.maxStorageCount * 0.8)
 
         for (let i = 0; i < filesToDelete; i++) {
             await this.removeFile(sortedFiles[i])
@@ -201,7 +218,10 @@ export class ChatLunaStorageService extends Service {
 
     private downloadFile(file: TempFileInfo): Promise<Buffer> {
         const storageType = file.storageType ?? 'local'
-        if (storageType !== 'local' && this.storageBackend.type === storageType) {
+        if (
+            storageType !== 'local' &&
+            this.storageBackend.type === storageType
+        ) {
             return this.storageBackend.download(file.path)
         }
         return fs.readFile(file.path)
@@ -237,9 +257,12 @@ export class ChatLunaStorageService extends Service {
         const execute = async () => {
             if (!ctx.scope.isActive) return
 
-            const expiredFiles = await ctx.database.get('chatluna_storage_temp', {
-                expireTime: { $lt: new Date(Date.now()) }
-            })
+            const expiredFiles = await ctx.database.get(
+                'chatluna_storage_temp',
+                {
+                    expireTime: { $lt: new Date(Date.now()) }
+                }
+            )
 
             if (expiredFiles.length === 0) return
 
@@ -247,7 +270,9 @@ export class ChatLunaStorageService extends Service {
                 await this.removeFile(file)
             }
 
-            logger.success(`Auto deleted ${expiredFiles.length} expired temp files`)
+            logger.success(
+                `Auto deleted ${expiredFiles.length} expired temp files`
+            )
         }
 
         const executeCleanup = async () => {
@@ -268,7 +293,8 @@ export class ChatLunaStorageService extends Service {
     async createTempFile(
         buffer: Buffer,
         filename: string,
-        expireHours?: number
+        expireHours?: number,
+        mimeType?: string
     ): Promise<TempFileInfoWithData<Buffer>> {
         // Compute hash first to detect duplicates
         const hash = computeHash(buffer)
@@ -303,18 +329,21 @@ export class ChatLunaStorageService extends Service {
             }
         }
 
-        const fileType = getImageType(buffer, true, true)
+        const imageType = getImageType(buffer, true, true)
+        const fileType = mimeType ?? getImageType(buffer)
 
         let randomName = randomFileName(filename)
-        if (fileType != null) {
-            randomName = (randomName.split('.')?.[0] ?? randomName) + '.' + fileType
+        if (imageType != null) {
+            randomName =
+                (randomName.split('.')?.[0] ?? randomName) + '.' + imageType
         }
 
         // Upload to storage backend
         const result = await this.storageBackend.upload(buffer, randomName)
 
         const expireTime = new Date(
-            Date.now() + (expireHours || this.config.tempCacheTime) * 60 * 60 * 1000
+            Date.now() +
+                (expireHours || this.config.tempCacheTime) * 60 * 60 * 1000
         )
         const currentTime = new Date()
         const fileInfo: TempFileInfo = {
@@ -339,6 +368,116 @@ export class ChatLunaStorageService extends Service {
             ...fileInfo,
             data: Promise.resolve(buffer),
             url
+        }
+    }
+
+    async createTempFileFromStream(
+        stream: NodeJS.ReadableStream,
+        filename: string,
+        meta: {
+            expireHours?: number
+            mimeType?: string
+            size?: number
+        } = {}
+    ): Promise<TempFileInfoWithData<Buffer>> {
+        const dir = await fs.mkdtemp(
+            path.join(os.tmpdir(), 'chatluna-storage-')
+        )
+        const tempPath = path.join(dir, randomFileName(filename))
+        const hash = createHash('sha256')
+        let size = 0
+
+        const meter = new Transform({
+            transform(chunk, _encoding, callback) {
+                const data = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+                size += data.length
+                hash.update(data)
+                callback(null, data)
+            }
+        })
+
+        try {
+            await pipeline(stream, meter, createWriteStream(tempPath))
+
+            const digest = hash.digest('hex')
+            const existing = await this.ctx.database.get(
+                'chatluna_storage_temp',
+                {
+                    hash: digest
+                }
+            )
+
+            if (existing.length > 0) {
+                const dup = existing[0]
+                const currentTime = new Date()
+
+                await this.ctx.database.set(
+                    'chatluna_storage_temp',
+                    { id: dup.id },
+                    {
+                        accessTime: currentTime,
+                        accessCount: dup.accessCount + 1
+                    }
+                )
+                this.addToLRU(dup.id)
+
+                const url =
+                    dup.publicUrl ?? `${this.backendPath}/temp/${dup.name}`
+                return {
+                    ...dup,
+                    accessTime: currentTime,
+                    accessCount: dup.accessCount + 1,
+                    data: this.downloadFile(dup),
+                    url
+                }
+            }
+
+            const randomName = randomFileName(filename)
+            const result = await this.storageBackend.uploadStream(
+                createReadStream(tempPath),
+                randomName,
+                {
+                    size,
+                    hash: digest,
+                    mimeType: meta.mimeType
+                }
+            )
+
+            const expireTime = new Date(
+                Date.now() +
+                    (meta.expireHours || this.config.tempCacheTime) *
+                        60 *
+                        60 *
+                        1000
+            )
+            const currentTime = new Date()
+            const fileInfo: TempFileInfo = {
+                id: randomName.split('.')[0],
+                path: result.key,
+                name: randomName,
+                type: meta.mimeType,
+                expireTime,
+                size,
+                accessTime: currentTime,
+                accessCount: 1,
+                storageType: this.storageBackend.type,
+                publicUrl: result.publicUrl,
+                hash: digest
+            }
+
+            await this.ctx.database.create('chatluna_storage_temp', fileInfo)
+            this.addToLRU(fileInfo.id)
+
+            const url =
+                result.publicUrl ?? `${this.backendPath}/temp/${randomName}`
+            return {
+                ...fileInfo,
+                data: this.downloadFile(fileInfo),
+                url
+            }
+        } finally {
+            await fs.unlink(tempPath).catch(() => undefined)
+            await fs.rmdir(dir).catch(() => undefined)
         }
     }
 
@@ -376,17 +515,28 @@ export class ChatLunaStorageService extends Service {
 
             // Backfill missing hash: compute and persist asynchronously
             if (!file.hash) {
-                dataPromise.then((data) => {
-                    const hash = computeHash(data)
-                    this.ctx.database
-                        .set('chatluna_storage_temp', { id: file.id }, { hash })
-                        .catch((err) =>
-                            logger.warn('Failed to backfill hash for file', file.id, err)
-                        )
-                }).catch(() => {})
+                dataPromise
+                    .then((data) => {
+                        const hash = computeHash(data)
+                        this.ctx.database
+                            .set(
+                                'chatluna_storage_temp',
+                                { id: file.id },
+                                { hash }
+                            )
+                            .catch((err) =>
+                                logger.warn(
+                                    'Failed to backfill hash for file',
+                                    file.id,
+                                    err
+                                )
+                            )
+                    })
+                    .catch(() => {})
             }
 
-            const url = file.publicUrl ?? `${this.backendPath}/temp/${file.name}`
+            const url =
+                file.publicUrl ?? `${this.backendPath}/temp/${file.name}`
             return {
                 ...file,
                 accessTime: currentTime,

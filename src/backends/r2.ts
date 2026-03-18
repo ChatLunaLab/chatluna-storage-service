@@ -1,5 +1,11 @@
 import { createHmac, createHash } from 'crypto'
-import { StorageBackend, StorageResult, R2StorageConfig } from './base'
+import {
+    readStream,
+    StorageBackend,
+    StorageResult,
+    R2StorageConfig,
+    StorageUploadOptions
+} from './base'
 
 /**
  * Cloudflare R2 Storage Backend
@@ -29,12 +35,10 @@ export class R2StorageBackend implements StorageBackend {
         const amzDate = date.toISOString().replace(/[:-]|\.\d{3}/g, '')
         const dateStamp = amzDate.slice(0, 8)
 
-        const payloadHash = createHash('sha256')
-            .update(buffer)
-            .digest('hex')
+        const payloadHash = createHash('sha256').update(buffer).digest('hex')
 
         const headers: Record<string, string> = {
-            'Host': new URL(url).host,
+            Host: new URL(url).host,
             'x-amz-date': amzDate,
             'x-amz-content-sha256': payloadHash,
             'Content-Type': 'application/octet-stream',
@@ -71,6 +75,61 @@ export class R2StorageBackend implements StorageBackend {
         }
     }
 
+    async uploadStream(
+        stream: NodeJS.ReadableStream,
+        filename: string,
+        options: StorageUploadOptions = {}
+    ): Promise<StorageResult> {
+        if (options.size == null || !options.hash) {
+            return await this.upload(await readStream(stream), filename)
+        }
+
+        const key = `temp/${filename}`
+        const url = `${this.endpoint}/${this.config.bucket}/${key}`
+
+        const date = new Date()
+        const amzDate = date.toISOString().replace(/[:-]|\.\d{3}/g, '')
+        const dateStamp = amzDate.slice(0, 8)
+
+        const headers: Record<string, string> = {
+            Host: new URL(url).host,
+            'x-amz-date': amzDate,
+            'x-amz-content-sha256': options.hash,
+            'Content-Type': options.mimeType ?? 'application/octet-stream',
+            'Content-Length': options.size.toString()
+        }
+
+        const authorization = this.generateAuthorizationHeader(
+            'PUT',
+            key,
+            headers,
+            options.hash,
+            dateStamp,
+            amzDate
+        )
+
+        headers['Authorization'] = authorization
+
+        const response = await fetch(url, {
+            method: 'PUT',
+            headers,
+            body: stream as never,
+            duplex: 'half' as never
+        } as RequestInit)
+
+        if (!response.ok) {
+            const text = await response.text()
+            throw new Error(`R2 upload failed: ${response.status} ${text}`)
+        }
+
+        return {
+            key,
+            publicUrl: this.hasPublicUrl
+                ? `${this.config.publicUrl}/${key}`
+                : undefined
+        }
+    }
+
     async download(key: string): Promise<Buffer> {
         const url = `${this.endpoint}/${this.config.bucket}/${key}`
 
@@ -81,7 +140,7 @@ export class R2StorageBackend implements StorageBackend {
         const payloadHash = 'UNSIGNED-PAYLOAD'
 
         const headers: Record<string, string> = {
-            'Host': new URL(url).host,
+            Host: new URL(url).host,
             'x-amz-date': amzDate,
             'x-amz-content-sha256': payloadHash
         }
@@ -119,7 +178,7 @@ export class R2StorageBackend implements StorageBackend {
         const payloadHash = createHash('sha256').update('').digest('hex')
 
         const headers: Record<string, string> = {
-            'Host': new URL(url).host,
+            Host: new URL(url).host,
             'x-amz-date': amzDate,
             'x-amz-content-sha256': payloadHash
         }
@@ -155,7 +214,7 @@ export class R2StorageBackend implements StorageBackend {
         const payloadHash = 'UNSIGNED-PAYLOAD'
 
         const headers: Record<string, string> = {
-            'Host': new URL(url).host,
+            Host: new URL(url).host,
             'x-amz-date': amzDate,
             'x-amz-content-sha256': payloadHash
         }
@@ -203,7 +262,10 @@ export class R2StorageBackend implements StorageBackend {
             Object.keys(headers)
                 .map((h) => h.toLowerCase())
                 .sort()
-                .map((h) => `${h}:${headers[Object.keys(headers).find((k) => k.toLowerCase() === h)!].trim()}`)
+                .map(
+                    (h) =>
+                        `${h}:${headers[Object.keys(headers).find((k) => k.toLowerCase() === h)!].trim()}`
+                )
                 .join('\n') + '\n'
 
         const canonicalRequest = [
