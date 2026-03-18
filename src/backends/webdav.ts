@@ -1,4 +1,5 @@
 import {
+    createStreamingRequestInit,
     readStream,
     StorageBackend,
     StorageResult,
@@ -8,12 +9,11 @@ import {
 
 export class WebDAVStorageBackend implements StorageBackend {
     readonly type = 'webdav' as const
-    readonly hasPublicUrl: boolean
+    readonly hasPublicUrl = true
 
     private basePath: string
 
     constructor(private config: WebDAVStorageConfig) {
-        this.hasPublicUrl = !!config.publicUrl
         this.basePath = this.trimSlash(config.basePath ?? 'chatluna-storage')
     }
 
@@ -51,13 +51,9 @@ export class WebDAVStorageBackend implements StorageBackend {
             throw new Error(`WebDAV upload failed: ${response.status}`)
         }
 
-        const publicUrl = this.config.publicUrl
-            ? `${this.trimSlash(this.config.publicUrl)}/${this.encodePath(remotePath)}`
-            : undefined
-
         return {
             key: remotePath,
-            publicUrl
+            publicUrl: url
         }
     }
 
@@ -85,12 +81,13 @@ export class WebDAVStorageBackend implements StorageBackend {
 
         await this.ensureDirectory(`${this.basePath}/temp`)
 
-        const response = await fetch(url, {
-            method: 'PUT',
-            headers,
-            body: stream as never,
-            duplex: 'half' as never
-        } as RequestInit)
+        const response = await fetch(
+            url,
+            createStreamingRequestInit(stream, {
+                method: 'PUT',
+                headers
+            })
+        )
 
         if (
             !response.ok &&
@@ -100,13 +97,9 @@ export class WebDAVStorageBackend implements StorageBackend {
             throw new Error(`WebDAV upload failed: ${response.status}`)
         }
 
-        const publicUrl = this.config.publicUrl
-            ? `${this.trimSlash(this.config.publicUrl)}/${this.encodePath(remotePath)}`
-            : undefined
-
         return {
             key: remotePath,
-            publicUrl
+            publicUrl: url
         }
     }
 

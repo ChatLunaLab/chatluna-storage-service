@@ -1,5 +1,6 @@
 import { createHmac, createHash } from 'crypto'
 import {
+    createStreamingRequestInit,
     readStream,
     StorageBackend,
     StorageResult,
@@ -13,12 +14,11 @@ import {
  */
 export class R2StorageBackend implements StorageBackend {
     readonly type = 'r2' as const
-    readonly hasPublicUrl: boolean
+    readonly hasPublicUrl = true
 
     private endpoint: string
 
     constructor(private config: R2StorageConfig) {
-        this.hasPublicUrl = !!config.publicUrl
         // R2 endpoint format: https://<ACCOUNT_ID>.r2.cloudflarestorage.com
         this.endpoint = `https://${config.accountId}.r2.cloudflarestorage.com`
     }
@@ -69,9 +69,7 @@ export class R2StorageBackend implements StorageBackend {
 
         return {
             key,
-            publicUrl: this.hasPublicUrl
-                ? `${this.config.publicUrl}/${key}`
-                : undefined
+            publicUrl: url
         }
     }
 
@@ -110,12 +108,13 @@ export class R2StorageBackend implements StorageBackend {
 
         headers['Authorization'] = authorization
 
-        const response = await fetch(url, {
-            method: 'PUT',
-            headers,
-            body: stream as never,
-            duplex: 'half' as never
-        } as RequestInit)
+        const response = await fetch(
+            url,
+            createStreamingRequestInit(stream, {
+                method: 'PUT',
+                headers
+            })
+        )
 
         if (!response.ok) {
             const text = await response.text()
@@ -124,9 +123,7 @@ export class R2StorageBackend implements StorageBackend {
 
         return {
             key,
-            publicUrl: this.hasPublicUrl
-                ? `${this.config.publicUrl}/${key}`
-                : undefined
+            publicUrl: url
         }
     }
 

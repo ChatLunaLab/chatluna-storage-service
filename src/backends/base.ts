@@ -1,3 +1,5 @@
+import { Readable } from 'stream'
+
 /**
  * Storage backend interface and types
  */
@@ -75,7 +77,6 @@ export interface S3StorageConfig {
     region: string
     accessKeyId: string
     secretAccessKey: string
-    publicUrl?: string
     pathStyle?: boolean
 }
 
@@ -85,7 +86,6 @@ export interface WebDAVStorageConfig {
     username?: string
     password?: string
     basePath?: string
-    publicUrl?: string
 }
 
 export interface R2StorageConfig {
@@ -94,7 +94,6 @@ export interface R2StorageConfig {
     bucket: string
     accessKeyId: string
     secretAccessKey: string
-    publicUrl?: string
 }
 
 export type StorageConfig =
@@ -109,4 +108,37 @@ export async function readStream(stream: NodeJS.ReadableStream) {
         chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
     }
     return Buffer.concat(chunks)
+}
+
+async function* toUint8ArrayStream(
+    stream: NodeJS.ReadableStream
+): AsyncIterable<Uint8Array> {
+    for await (const chunk of stream) {
+        yield typeof chunk === 'string' ? Buffer.from(chunk) : chunk
+    }
+}
+
+type StreamingRequestInit = Omit<RequestInit, 'body'> & {
+    duplex?: 'half'
+}
+
+type FetchRequestInit = RequestInit & {
+    duplex?: 'half'
+}
+
+type StreamingRequestBody = NonNullable<RequestInit['body']>
+
+export function createStreamingRequestInit(
+    stream: NodeJS.ReadableStream,
+    init: StreamingRequestInit
+): FetchRequestInit {
+    const body = Readable.toWeb(
+        Readable.from(toUint8ArrayStream(stream))
+    ) as unknown as StreamingRequestBody
+
+    return {
+        ...init,
+        body,
+        duplex: init.duplex ?? 'half'
+    }
 }

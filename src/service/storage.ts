@@ -102,7 +102,6 @@ export class ChatLunaStorageService extends Service {
                     region: this.config.s3Region!,
                     accessKeyId: this.config.s3AccessKeyId!,
                     secretAccessKey: this.config.s3SecretAccessKey!,
-                    publicUrl: this.config.s3PublicUrl,
                     pathStyle: this.config.s3PathStyle
                 }
             case 'webdav':
@@ -111,8 +110,7 @@ export class ChatLunaStorageService extends Service {
                     endpoint: this.config.webdavEndpoint!,
                     username: this.config.webdavUsername,
                     password: this.config.webdavPassword,
-                    basePath: this.config.webdavBasePath,
-                    publicUrl: this.config.webdavPublicUrl
+                    basePath: this.config.webdavBasePath
                 }
             case 'r2':
                 return {
@@ -120,8 +118,7 @@ export class ChatLunaStorageService extends Service {
                     accountId: this.config.r2AccountId!,
                     bucket: this.config.r2Bucket!,
                     accessKeyId: this.config.r2AccessKeyId!,
-                    secretAccessKey: this.config.r2SecretAccessKey!,
-                    publicUrl: this.config.r2PublicUrl
+                    secretAccessKey: this.config.r2SecretAccessKey!
                 }
             case 'local':
             default:
@@ -549,6 +546,23 @@ export class ChatLunaStorageService extends Service {
             this.removeFromLRU(id)
             return null
         }
+    }
+
+    async deleteTempFile(id: string): Promise<boolean> {
+        let fileInfo = await this.ctx.database.get('chatluna_storage_temp', {
+            id
+        })
+
+        if (fileInfo.length === 0) {
+            fileInfo = await this.ctx.database.get('chatluna_storage_temp', {
+                name: id
+            })
+        }
+
+        if (fileInfo.length === 0) return false
+
+        await this.removeFile(fileInfo[0])
+        return true
     }
 }
 

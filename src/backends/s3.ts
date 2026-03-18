@@ -1,5 +1,6 @@
 import { createHmac, createHash } from 'crypto'
 import {
+    createStreamingRequestInit,
     readStream,
     StorageBackend,
     StorageResult,
@@ -9,11 +10,9 @@ import {
 
 export class S3StorageBackend implements StorageBackend {
     readonly type = 's3' as const
-    readonly hasPublicUrl: boolean
+    readonly hasPublicUrl = true
 
-    constructor(private config: S3StorageConfig) {
-        this.hasPublicUrl = !!config.publicUrl
-    }
+    constructor(private config: S3StorageConfig) {}
 
     async init(): Promise<void> {
         // S3 doesn't require initialization
@@ -21,7 +20,7 @@ export class S3StorageBackend implements StorageBackend {
 
     async upload(buffer: Buffer, filename: string): Promise<StorageResult> {
         const key = `temp/${filename}`
-        const url = this.buildS3Url(key)
+        const request = this.buildRequestTarget(key)
 
         const date = new Date()
         const amzDate = date.toISOString().replace(/[:-]|\.\d{3}/g, '')
@@ -30,7 +29,7 @@ export class S3StorageBackend implements StorageBackend {
         const payloadHash = createHash('sha256').update(buffer).digest('hex')
 
         const headers: Record<string, string> = {
-            Host: new URL(url).host,
+            Host: request.host,
             'x-amz-date': amzDate,
             'x-amz-content-sha256': payloadHash,
             'Content-Type': 'application/octet-stream',
@@ -39,7 +38,7 @@ export class S3StorageBackend implements StorageBackend {
 
         const authorization = this.generateAuthorizationHeader(
             'PUT',
-            key,
+            request.canonicalUri,
             headers,
             payloadHash,
             dateStamp,
@@ -48,7 +47,7 @@ export class S3StorageBackend implements StorageBackend {
 
         headers['Authorization'] = authorization
 
-        const response = await fetch(url, {
+        const response = await fetch(request.url, {
             method: 'PUT',
             headers,
             body: new Uint8Array(buffer)
@@ -61,9 +60,7 @@ export class S3StorageBackend implements StorageBackend {
 
         return {
             key,
-            publicUrl: this.hasPublicUrl
-                ? `${this.config.publicUrl}/${key}`
-                : undefined
+            publicUrl: request.url
         }
     }
 
@@ -77,14 +74,14 @@ export class S3StorageBackend implements StorageBackend {
         }
 
         const key = `temp/${filename}`
-        const url = this.buildS3Url(key)
+        const request = this.buildRequestTarget(key)
 
         const date = new Date()
         const amzDate = date.toISOString().replace(/[:-]|\.\d{3}/g, '')
         const dateStamp = amzDate.slice(0, 8)
 
         const headers: Record<string, string> = {
-            Host: new URL(url).host,
+            Host: request.host,
             'x-amz-date': amzDate,
             'x-amz-content-sha256': options.hash,
             'Content-Type': options.mimeType ?? 'application/octet-stream',
@@ -93,7 +90,7 @@ export class S3StorageBackend implements StorageBackend {
 
         const authorization = this.generateAuthorizationHeader(
             'PUT',
-            key,
+            request.canonicalUri,
             headers,
             options.hash,
             dateStamp,
@@ -102,12 +99,13 @@ export class S3StorageBackend implements StorageBackend {
 
         headers['Authorization'] = authorization
 
-        const response = await fetch(url, {
-            method: 'PUT',
-            headers,
-            body: stream as never,
-            duplex: 'half' as never
-        } as RequestInit)
+        const response = await fetch(
+            request.url,
+            createStreamingRequestInit(stream, {
+                method: 'PUT',
+                headers
+            })
+        )
 
         if (!response.ok) {
             const text = await response.text()
@@ -116,14 +114,12 @@ export class S3StorageBackend implements StorageBackend {
 
         return {
             key,
-            publicUrl: this.hasPublicUrl
-                ? `${this.config.publicUrl}/${key}`
-                : undefined
+            publicUrl: request.url
         }
     }
 
     async download(key: string): Promise<Buffer> {
-        const url = this.buildS3Url(key)
+        const request = this.buildRequestTarget(key)
 
         const date = new Date()
         const amzDate = date.toISOString().replace(/[:-]|\.\d{3}/g, '')
@@ -132,14 +128,14 @@ export class S3StorageBackend implements StorageBackend {
         const payloadHash = 'UNSIGNED-PAYLOAD'
 
         const headers: Record<string, string> = {
-            Host: new URL(url).host,
+            Host: request.host,
             'x-amz-date': amzDate,
             'x-amz-content-sha256': payloadHash
         }
 
         const authorization = this.generateAuthorizationHeader(
             'GET',
-            key,
+            request.canonicalUri,
             headers,
             payloadHash,
             dateStamp,
@@ -148,7 +144,7 @@ export class S3StorageBackend implements StorageBackend {
 
         headers['Authorization'] = authorization
 
-        const response = await fetch(url, {
+        const response = await fetch(request.url, {
             method: 'GET',
             headers
         })
@@ -161,7 +157,7 @@ export class S3StorageBackend implements StorageBackend {
     }
 
     async delete(key: string): Promise<void> {
-        const url = this.buildS3Url(key)
+        const request = this.buildRequestTarget(key)
 
         const date = new Date()
         const amzDate = date.toISOString().replace(/[:-]|\.\d{3}/g, '')
@@ -170,14 +166,14 @@ export class S3StorageBackend implements StorageBackend {
         const payloadHash = createHash('sha256').update('').digest('hex')
 
         const headers: Record<string, string> = {
-            Host: new URL(url).host,
+            Host: request.host,
             'x-amz-date': amzDate,
             'x-amz-content-sha256': payloadHash
         }
 
         const authorization = this.generateAuthorizationHeader(
             'DELETE',
-            key,
+            request.canonicalUri,
             headers,
             payloadHash,
             dateStamp,
@@ -186,7 +182,7 @@ export class S3StorageBackend implements StorageBackend {
 
         headers['Authorization'] = authorization
 
-        const response = await fetch(url, {
+        const response = await fetch(request.url, {
             method: 'DELETE',
             headers
         })
@@ -197,7 +193,7 @@ export class S3StorageBackend implements StorageBackend {
     }
 
     async exists(key: string): Promise<boolean> {
-        const url = this.buildS3Url(key)
+        const request = this.buildRequestTarget(key)
 
         const date = new Date()
         const amzDate = date.toISOString().replace(/[:-]|\.\d{3}/g, '')
@@ -206,14 +202,14 @@ export class S3StorageBackend implements StorageBackend {
         const payloadHash = 'UNSIGNED-PAYLOAD'
 
         const headers: Record<string, string> = {
-            Host: new URL(url).host,
+            Host: request.host,
             'x-amz-date': amzDate,
             'x-amz-content-sha256': payloadHash
         }
 
         const authorization = this.generateAuthorizationHeader(
             'HEAD',
-            key,
+            request.canonicalUri,
             headers,
             payloadHash,
             dateStamp,
@@ -222,7 +218,7 @@ export class S3StorageBackend implements StorageBackend {
 
         headers['Authorization'] = authorization
 
-        const response = await fetch(url, {
+        const response = await fetch(request.url, {
             method: 'HEAD',
             headers
         })
@@ -230,23 +226,42 @@ export class S3StorageBackend implements StorageBackend {
         return response.ok
     }
 
-    private buildS3Url(key: string): string {
+    private buildRequestTarget(key: string): S3RequestTarget {
         const endpoint = new URL(this.config.endpoint)
         const shouldUsePathStyle =
-            this.config.pathStyle ||
+            (this.config.pathStyle ?? true) ||
             endpoint.hostname === 'localhost' ||
             endpoint.hostname.match(/^(\d{1,3}\.){3}\d{1,3}$/)
+        const encodedKey = this.encodePath(key)
+        const basePath = endpoint.pathname.replace(/\/+$/, '')
 
         if (shouldUsePathStyle) {
-            return `${endpoint.origin}/${this.config.bucket}/${key}`
+            const path = this.joinUrlPath(
+                basePath,
+                this.config.bucket,
+                encodedKey
+            )
+
+            return {
+                url: `${endpoint.origin}${path}`,
+                host: endpoint.host,
+                canonicalUri: path
+            }
         }
 
-        return `${endpoint.protocol}//${this.config.bucket}.${endpoint.host}/${key}`
+        const host = `${this.config.bucket}.${endpoint.host}`
+        const path = this.joinUrlPath(basePath, encodedKey)
+
+        return {
+            url: `${endpoint.protocol}//${host}${path}`,
+            host,
+            canonicalUri: path
+        }
     }
 
     private generateAuthorizationHeader(
         method: string,
-        key: string,
+        canonicalUri: string,
         headers: Record<string, string>,
         payloadHash: string,
         dateStamp: string,
@@ -255,7 +270,6 @@ export class S3StorageBackend implements StorageBackend {
         const region = this.config.region
         const service = 's3'
 
-        const canonicalUri = `/${this.config.bucket}/${key}`
         const canonicalQueryString = ''
 
         const signedHeaders = Object.keys(headers)
@@ -314,4 +328,27 @@ export class S3StorageBackend implements StorageBackend {
             .digest()
         return kSigning
     }
+
+    private joinUrlPath(...segments: string[]): string {
+        return (
+            '/' +
+            segments
+                .map((segment) => segment.replace(/^\/+|\/+$/g, ''))
+                .filter(Boolean)
+                .join('/')
+        )
+    }
+
+    private encodePath(path: string): string {
+        return path
+            .split('/')
+            .map((segment) => encodeURIComponent(segment))
+            .join('/')
+    }
+}
+
+interface S3RequestTarget {
+    url: string
+    host: string
+    canonicalUri: string
 }
